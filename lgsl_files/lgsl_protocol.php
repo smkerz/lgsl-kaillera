@@ -856,8 +856,11 @@
     $server['s']['players'] = empty($part['2']) ? 0 : count($part) - 2;
 
     if (isset($server['e']['maxclients']))    { $server['s']['playersmax'] = $server['e']['maxclients']; }    // QUAKE 2
-    if (isset($server['e']['sv_maxclients'])) { $server['s']['playersmax'] = $server['e']['sv_maxclients']; }
-
+    if ($server['b']['type'] == "wolfrtcw" && isset($server['e']['sv_maxcoopclients'])) {                     // RTCWCOOP FIX
+        $server['s']['playersmax'] = $server['e']['sv_maxcoopclients'];
+    } else if (isset($server['e']['sv_maxclients'])) {                                                        // GENERIC
+        $server['s']['playersmax'] = $server['e']['sv_maxclients'];
+    }
     if (isset($server['e']['pswrd']))      { $server['s']['password'] = $server['e']['pswrd']; }              // CALL OF DUTY
     if (isset($server['e']['needpass']))   { $server['s']['password'] = $server['e']['needpass']; }           // QUAKE 2
     if (isset($server['e']['g_needpass'])) { $server['s']['password'] = (int)$server['e']['g_needpass']; }

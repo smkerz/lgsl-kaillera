@@ -141,6 +141,7 @@
     "ts"            => "Teamspeak",
     "ts3"           => "Teamspeak 3",
     "teaspeak"      => "Teaspeak",
+    "kaillera"      => "Kaillera / EmuLinker",
     "urbanterror"   => "UrbanTerror",
     "ut"            => "Unreal Tournament",
     "ut2003"        => "Unreal Tournament 2003",
@@ -299,6 +300,7 @@
     "ts"            => "33",
     "ts3"           => "33",
     "teaspeak"      => "33",
+    "kaillera"      => "47",
     "warsow"        => "02",
     "warsowold"     => "02",
     "urbanterror"   => "02",
@@ -442,6 +444,7 @@
     "ts"            => "http://www.teamspeak.com",
     "ts3"           => "ts3server://{IP}?port={C_PORT}",
     "teaspeak"      => "ts3server://{IP}?port={C_PORT}",
+    "kaillera"      => "",
     "urbanterror"   => "qtracker://{IP}:{S_PORT}?game=UrbanTerror&action=show",
     "ut"            => "qtracker://{IP}:{S_PORT}?game=UnrealTournament&action=show",
     "ut2003"        => "qtracker://{IP}:{S_PORT}?game=UnrealTournament2003&action=show",
@@ -488,6 +491,7 @@
     "ts"            => "tcp",
     "ts3"           => "tcp",
     "teaspeak"      => "tcp",
+    "kaillera"      => "udp",
     "wow"           => "tcp");
 
     return isset($lgsl_scheme_list[$type]) ? $lgsl_scheme_list[$type] : "udp";
@@ -548,6 +552,7 @@
       case "ts"            : $c_to_q = 0;     $c_def = 8767;    $q_def = 51234;   $c_to_s = 0;   break;
       case "ts3"           : $c_to_q = 0;     $c_def = 9987;    $q_def = 10011;   $c_to_s = 0;   break;
       case "teaspeak"      : $c_to_q = 0;     $c_def = 9987;    $q_def = 10101;   $c_to_s = 0;   break;
+      case "kaillera"      : $c_to_q = 0;     $c_def = 27888;   $q_def = 27888;   $c_to_s = 0;   break;
       case "ut"            : $c_to_q = 1;     $c_def = 7777;    $q_def = 7778;    $c_to_s = 0;   break;
       case "ut2003"        : $c_to_q = 1;     $c_def = 7757;    $q_def = 7758;    $c_to_s = 10;  break;
       case "ut2003_"       : $c_to_q = 10;    $c_def = 7757;    $q_def = 7767;    $c_to_s = 0;   break;
@@ -5048,6 +5053,35 @@ function lgsl_unescape($text) {
   function lgsl_version()
   {
     return "Powered by LGSL</a> | <a href='https://github.com/tltneon/lgsl/releases'>v 6.2.1"; // little dirty trick
+  }
+
+//------------------------------------------------------------------------------------------------------------+
+//----  KAILLERA / EMULINKER  BEACON  (lgsl_query_47)  -------------------------------------------------------+
+//------------------------------------------------------------------------------------------------------------+
+
+  function lgsl_query_47(&$server, &$lgsl_need, &$lgsl_fp) // Kaillera / EmuLinker
+  {
+    // Send Kaillera handshake beacon
+    fwrite($lgsl_fp, "HELLO0.83\x00");
+
+    $buffer = fread($lgsl_fp, 4096);
+
+    if (!$buffer || strpos($buffer, "HELLOD00D") === FALSE) {
+      return FALSE;
+    }
+
+    // Beacon only confirms server is online - no detailed stats available
+    $server["s"]["name"]       = "Kaillera / EmuLinker";
+    $server["s"]["map"]        = "kaillera";
+    $server["s"]["players"]    = 0;
+    $server["s"]["playersmax"] = 100;
+    $server["s"]["password"]   = 0;
+
+    $lgsl_need["s"] = FALSE;
+    $lgsl_need["e"] = FALSE;
+    $lgsl_need["p"] = FALSE;
+
+    return TRUE;
   }
 
 //------------------------------------------------------------------------------------------------------------+

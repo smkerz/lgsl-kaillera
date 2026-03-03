@@ -5073,8 +5073,8 @@ function lgsl_unescape($text) {
     if (function_exists('curl_init')) {
       $ch = curl_init('http://www.kaillera.com/raw_server_list2.php');
       curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-      curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 3);
-      curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+      curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2);
+      curl_setopt($ch, CURLOPT_TIMEOUT, 3);
       curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
       $master_data = curl_exec($ch);
       $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -5220,10 +5220,10 @@ function lgsl_unescape($text) {
     // Phase 2: v086 binary protocol on assigned port (gets player names)
     if ($assigned_port > 0 && $assigned_port <= 65535)
     {
-      $fp2 = @fsockopen("udp://{$server['b']['ip']}", $assigned_port, $errno, $errstr, 3);
+      $fp2 = @fsockopen("udp://{$server['b']['ip']}", $assigned_port, $errno, $errstr, 1);
 
       if ($fp2) {
-        stream_set_timeout($fp2, 3);
+        stream_set_timeout($fp2, 0, 750000); // 750ms read timeout
         stream_set_blocking($fp2, TRUE);
 
         $bot_name = "lgsl_poll";
@@ -5237,13 +5237,16 @@ function lgsl_unescape($text) {
         // Receive messages: ServerACK(0x05) → send ClientACK(0x06) → ServerStatus(0x04)
         $server_status = null;
         $ack_sent = 0;
+        $empty_reads = 0;
 
-        for ($loop = 0; $loop < 15; $loop++) {
+        for ($loop = 0; $loop < 10; $loop++) {
           $packet = @fread($fp2, 65535);
           if (!$packet) {
-            if ($server_status || $ack_sent >= 3) { break; }
+            $empty_reads++;
+            if ($server_status || $empty_reads >= 1) { break; }
             continue;
           }
+          $empty_reads = 0; // reset on successful read
 
           $messages = lgsl_query_49_parse_bundle($packet);
 
@@ -5312,22 +5315,8 @@ function lgsl_unescape($text) {
       }
     }
 
-    // Phase 3: Fallback to JSON from Python poller (if available)
+    // Phase 3: Fallback to JSON from Python poller (if run via external cron)
     $json_file = dirname(__FILE__) . '/lgsl_kaillera_status.json';
-
-    $needs_refresh = !file_exists($json_file) || (time() - filemtime($json_file)) > 30;
-    if ($needs_refresh) {
-      $script_path = dirname(__FILE__) . '/kaillera_poll.py';
-      if (file_exists($script_path)) {
-        $python   = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' ? 'python' : 'python3';
-        $redirect = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' ? '2>NUL' : '2>/dev/null';
-        @shell_exec("{$python} " . escapeshellarg($script_path)
-          . " --ip "     . escapeshellarg($server['b']['ip'])
-          . " --port "   . escapeshellarg(intval($server['b']['q_port']))
-          . " --output " . escapeshellarg($json_file) . " {$redirect}");
-      }
-    }
-
     $status = lgsl_query_49_json_fetch($json_file, 60);
 
     if ($status && $status['online']) {
@@ -5366,7 +5355,7 @@ function lgsl_unescape($text) {
     $game_count  = 0;
 
     $cache_file = dirname(__FILE__) . '/lgsl_kaillera_master.cache';
-    $master_data = lgsl_query_49_master_fetch($cache_file, 10);
+    $master_data = lgsl_query_49_master_fetch($cache_file, 60);
 
     if ($master_data) {
       $server_ip   = $server['b']['ip'];

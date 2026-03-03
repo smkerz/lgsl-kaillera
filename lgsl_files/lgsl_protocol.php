@@ -300,7 +300,7 @@
     "ts"            => "33",
     "ts3"           => "33",
     "teaspeak"      => "33",
-    "kaillera"      => "47",
+    "kaillera"      => "49",
     "warsow"        => "02",
     "warsowold"     => "02",
     "urbanterror"   => "02",
@@ -5056,10 +5056,41 @@ function lgsl_unescape($text) {
   }
 
 //------------------------------------------------------------------------------------------------------------+
-//----  KAILLERA / EMULINKER  BEACON  (lgsl_query_47)  -------------------------------------------------------+
+//----  KAILLERA / EMULINKER  (lgsl_query_49)  ---------------------------------------------------------------+
 //------------------------------------------------------------------------------------------------------------+
 
-  function lgsl_query_47(&$server, &$lgsl_need, &$lgsl_fp) // Kaillera / EmuLinker
+  function lgsl_query_49_master_fetch($cache_file, $cache_ttl)
+  {
+    // Try cache first
+    if (file_exists($cache_file) && (time() - filemtime($cache_file)) < $cache_ttl) {
+      $cached = @file_get_contents($cache_file);
+      if ($cached) { return $cached; }
+    }
+
+    $master_data = false;
+
+    // Use curl (works even with allow_url_fopen=Off)
+    if (function_exists('curl_init')) {
+      $ch = curl_init('http://www.kaillera.com/raw_server_list2.php');
+      curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+      curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 3);
+      curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+      curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
+      $master_data = curl_exec($ch);
+      $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+      curl_close($ch);
+
+      if ($http_code != 200) { $master_data = false; }
+    }
+
+    if ($master_data) {
+      @file_put_contents($cache_file, $master_data);
+    }
+
+    return $master_data;
+  }
+
+  function lgsl_query_49(&$server, &$lgsl_need, &$lgsl_fp) // Kaillera / EmuLinker
   {
     // Send Kaillera handshake beacon
     fwrite($lgsl_fp, "HELLO0.83\x00");
@@ -5070,11 +5101,45 @@ function lgsl_unescape($text) {
       return FALSE;
     }
 
-    // Beacon only confirms server is online - no detailed stats available
-    $server["s"]["name"]       = "Kaillera / EmuLinker";
-    $server["s"]["map"]        = "kaillera";
-    $server["s"]["players"]    = 0;
-    $server["s"]["playersmax"] = 100;
+    // Defaults
+    $players     = 0;
+    $playersmax  = 100;
+    $server_name = "Kaillera / EmuLinker";
+    $game_count  = 0;
+
+    // Query Kaillera master server for player count
+    $cache_file = dirname(__FILE__) . '/lgsl_kaillera_master.cache';
+    $master_data = lgsl_query_49_master_fetch($cache_file, 10);
+
+    if ($master_data) {
+      $server_ip   = $server['b']['ip'];
+      $server_port = intval($server['b']['q_port']);
+      $lines = explode("\n", trim($master_data));
+
+      for ($i = 0; $i + 1 < count($lines); $i += 2) {
+        $parts = explode(";", $lines[$i + 1]);
+
+        if (count($parts) >= 5) {
+          $addr_parts = explode(":", $parts[0]);
+
+          if (count($addr_parts) == 2
+            && trim($addr_parts[0]) == $server_ip
+            && intval($addr_parts[1]) == $server_port) {
+            $user_parts  = explode("/", $parts[1]);
+            $players     = intval($user_parts[0]);
+            $playersmax  = isset($user_parts[1]) ? intval($user_parts[1]) : 100;
+            $server_name = trim($lines[$i]);
+            $game_count  = intval($parts[2]);
+            break;
+          }
+        }
+      }
+    }
+
+    $server["s"]["name"]       = $server_name;
+    $server["s"]["map"]        = $game_count > 0 ? $game_count . " game(s)" : "Kaillera";
+    $server["s"]["players"]    = $players;
+    $server["s"]["playersmax"] = $playersmax;
     $server["s"]["password"]   = 0;
 
     $lgsl_need["s"] = FALSE;

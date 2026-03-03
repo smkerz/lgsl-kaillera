@@ -5090,9 +5090,120 @@ function lgsl_unescape($text) {
     return $master_data;
   }
 
+  function lgsl_query_49_json_fetch($json_file, $max_age = 60)
+  {
+    if (!file_exists($json_file)) { return false; }
+
+    $json_data = @file_get_contents($json_file);
+    if (!$json_data) { return false; }
+
+    $data = @json_decode($json_data, true);
+    if (!$data || !isset($data['last_updated'])) { return false; }
+
+    // If the JSON is older than max_age seconds, consider it stale
+    if ((time() - $data['last_updated']) > $max_age) { return false; }
+
+    return $data;
+  }
+
+  function lgsl_query_49_build_bundle($messages)
+  {
+    // Build a Kaillera v086 UDP bundle from array of [msg_number, msg_type, body]
+    $data = chr(count($messages));
+    foreach ($messages as $msg) {
+      $msg_len = strlen($msg[2]) + 1; // +1 for type byte
+      $data .= pack("vvC", $msg[0], $msg_len, $msg[1]);
+      $data .= $msg[2];
+    }
+    return $data;
+  }
+
+  function lgsl_query_49_parse_bundle($data)
+  {
+    // Parse a received Kaillera v086 UDP bundle into array of [msg_number, msg_type, body]
+    $messages = array();
+    if (strlen($data) < 1) { return $messages; }
+
+    $count = ord($data[0]);
+    $offset = 1;
+
+    for ($i = 0; $i < $count; $i++) {
+      if ($offset + 5 > strlen($data)) { break; }
+      $header = unpack("vmsg_num/vmsg_len/Cmsg_type", substr($data, $offset, 5));
+      $offset += 5;
+      $body_len = max(0, $header['msg_len'] - 1);
+      $body = substr($data, $offset, $body_len);
+      $offset += $body_len;
+      $messages[] = array($header['msg_num'], $header['msg_type'], $body);
+    }
+
+    return $messages;
+  }
+
+  function lgsl_query_49_parse_status($body)
+  {
+    // Parse ServerStatus (type 0x04) body into users[] and games[]
+    if (strlen($body) < 9) { return array("users" => array(), "games" => array()); }
+
+    $offset = 1; // Skip padding byte
+
+    $num_users = unpack("V", substr($body, $offset, 4))[1]; $offset += 4;
+    $num_games = unpack("V", substr($body, $offset, 4))[1]; $offset += 4;
+
+    $users = array();
+    for ($i = 0; $i < $num_users; $i++) {
+      if ($offset >= strlen($body)) { break; }
+
+      // Read null-terminated name
+      $end = strpos($body, "\x00", $offset);
+      if ($end === FALSE) { break; }
+      $name = substr($body, $offset, $end - $offset);
+      $offset = $end + 1;
+
+      if ($offset + 8 > strlen($body)) { break; }
+
+      $ping      = unpack("V", substr($body, $offset, 4))[1]; $offset += 4;
+      $status    = ord($body[$offset]);                         $offset += 1;
+      $user_id   = unpack("v", substr($body, $offset, 2))[1];  $offset += 2;
+      $conn_type = ord($body[$offset]);                         $offset += 1;
+
+      $users[] = array("name" => $name, "ping" => $ping, "status" => $status, "id" => $user_id, "connection" => $conn_type);
+    }
+
+    $games = array();
+    for ($i = 0; $i < $num_games; $i++) {
+      if ($offset >= strlen($body)) { break; }
+
+      // rom_name\x00
+      $end = strpos($body, "\x00", $offset);
+      if ($end === FALSE) { break; }
+      $rom_name = substr($body, $offset, $end - $offset);
+      $offset = $end + 1;
+
+      if ($offset + 4 > strlen($body)) { break; }
+      $game_id = unpack("V", substr($body, $offset, 4))[1]; $offset += 4;
+
+      // client_type\x00, owner\x00, players\x00
+      $fields = array();
+      for ($f = 0; $f < 3; $f++) {
+        $end = strpos($body, "\x00", $offset);
+        if ($end === FALSE) { $end = strlen($body); }
+        $fields[] = substr($body, $offset, $end - $offset);
+        $offset = $end + 1;
+      }
+
+      $game_status = ($offset < strlen($body)) ? ord($body[$offset]) : 0;
+      $offset += 1;
+
+      $games[] = array("name" => $rom_name, "id" => $game_id, "emulator" => $fields[0], "owner" => $fields[1], "players" => $fields[2], "status" => $game_status);
+    }
+
+    return array("users" => $users, "games" => $games);
+  }
+
   function lgsl_query_49(&$server, &$lgsl_need, &$lgsl_fp) // Kaillera / EmuLinker
   {
-    // Send Kaillera handshake beacon
+    // Phase 1: HELLO beacon on main port (online detection)
     fwrite($lgsl_fp, "HELLO0.83\x00");
 
     $buffer = fread($lgsl_fp, 4096);
@@ -5101,13 +5212,159 @@ function lgsl_unescape($text) {
       return FALSE;
     }
 
-    // Defaults
+    // Extract assigned port from HELLOD00D{port}\x00
+    $null_pos = strpos($buffer, "\x00");
+    $hello_str = ($null_pos !== FALSE) ? substr($buffer, 0, $null_pos) : $buffer;
+    $assigned_port = intval(substr($hello_str, 9));
+
+    // Phase 2: v086 binary protocol on assigned port (gets player names)
+    if ($assigned_port > 0 && $assigned_port <= 65535)
+    {
+      $fp2 = @fsockopen("udp://{$server['b']['ip']}", $assigned_port, $errno, $errstr, 3);
+
+      if ($fp2) {
+        stream_set_timeout($fp2, 3);
+        stream_set_blocking($fp2, TRUE);
+
+        $bot_name = "lgsl_poll";
+        $msg_num  = 0;
+
+        // Send UserInformation (type 0x03): name\x00 + client\x00 + conntype
+        $ui_body = $bot_name . "\x00" . "LGSL/1.0" . "\x00" . "\x01";
+        fwrite($fp2, lgsl_query_49_build_bundle(array(array($msg_num, 0x03, $ui_body))));
+        $msg_num++;
+
+        // Receive messages: ServerACK(0x05) → send ClientACK(0x06) → ServerStatus(0x04)
+        $server_status = null;
+        $ack_sent = 0;
+
+        for ($loop = 0; $loop < 15; $loop++) {
+          $packet = @fread($fp2, 65535);
+          if (!$packet) {
+            if ($server_status || $ack_sent >= 3) { break; }
+            continue;
+          }
+
+          $messages = lgsl_query_49_parse_bundle($packet);
+
+          foreach ($messages as $msg) {
+            if ($msg[1] == 0x05 && $ack_sent < 6) { // ServerACK → reply with ClientACK
+              $ack_body = "\x00" . pack("V4", 0, 1, 2, 3);
+              $ack_msgs = array();
+              for ($j = 0; $j < 3; $j++) {
+                $ack_msgs[] = array($msg_num, 0x06, $ack_body);
+                $msg_num++;
+              }
+              fwrite($fp2, lgsl_query_49_build_bundle($ack_msgs));
+              $ack_sent += 3;
+            }
+            elseif ($msg[1] == 0x04) { // ServerStatus
+              $server_status = lgsl_query_49_parse_status($msg[2]);
+            }
+          }
+
+          if ($server_status) { break; }
+        }
+
+        // Send Quit (type 0x01)
+        $quit_body = "\x00" . pack("v", 0xFFFF) . $bot_name . "\x00";
+        @fwrite($fp2, lgsl_query_49_build_bundle(array(array($msg_num, 0x01, $quit_body))));
+        @fclose($fp2);
+
+        if ($server_status) {
+          // Filter out our bot from the user list
+          $real_users = array();
+          foreach ($server_status['users'] as $u) {
+            if ($u['name'] !== $bot_name) { $real_users[] = $u; }
+          }
+
+          $server["s"]["name"]       = "Kaillera / EmuLinker";
+          $server["s"]["map"]        = count($server_status['games']) > 0 ? count($server_status['games']) . " game(s)" : "Kaillera";
+          $server["s"]["players"]    = count($real_users);
+          $server["s"]["playersmax"] = 100;
+          $server["s"]["password"]   = 0;
+
+          // Populate player list with names, ping and status
+          $status_labels = array(0 => "Idle", 1 => "Playing", 2 => "Away");
+          foreach ($real_users as $key => $user) {
+            $server["p"][$key]["name"]  = $user['name'];
+            $server["p"][$key]["ping"]  = $user['ping'];
+            $server["p"][$key]["score"] = isset($status_labels[$user['status']]) ? $status_labels[$user['status']] : "Unknown";
+          }
+
+          // Populate extra info with active games
+          foreach ($server_status['games'] as $gi => $game) {
+            $game_info = $game['name'];
+            if (!empty($game['owner'])) {
+              $game_info .= " (" . $game['owner'];
+              if (!empty($game['players'])) { $game_info .= ", " . $game['players']; }
+              $game_info .= ")";
+            }
+            $server["e"]["game_{$gi}"] = $game_info;
+          }
+
+          $lgsl_need["s"] = FALSE;
+          $lgsl_need["e"] = FALSE;
+          $lgsl_need["p"] = FALSE;
+
+          return TRUE;
+        }
+      }
+    }
+
+    // Phase 3: Fallback to JSON from Python poller (if available)
+    $json_file = dirname(__FILE__) . '/lgsl_kaillera_status.json';
+
+    $needs_refresh = !file_exists($json_file) || (time() - filemtime($json_file)) > 30;
+    if ($needs_refresh) {
+      $script_path = dirname(__FILE__) . '/kaillera_poll.py';
+      if (file_exists($script_path)) {
+        $python   = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' ? 'python' : 'python3';
+        $redirect = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' ? '2>NUL' : '2>/dev/null';
+        @shell_exec("{$python} " . escapeshellarg($script_path)
+          . " --ip "     . escapeshellarg($server['b']['ip'])
+          . " --port "   . escapeshellarg(intval($server['b']['q_port']))
+          . " --output " . escapeshellarg($json_file) . " {$redirect}");
+      }
+    }
+
+    $status = lgsl_query_49_json_fetch($json_file, 60);
+
+    if ($status && $status['online']) {
+      $server["s"]["name"]       = !empty($status['server_name']) ? $status['server_name'] : "Kaillera / EmuLinker";
+      $server["s"]["map"]        = $status['games_count'] > 0 ? $status['games_count'] . " game(s)" : "Kaillera";
+      $server["s"]["players"]    = intval($status['players']);
+      $server["s"]["playersmax"] = intval($status['max_players']);
+      $server["s"]["password"]   = 0;
+
+      if (!empty($status['users'])) {
+        $status_labels = array(0 => "Idle", 1 => "Playing", 2 => "Away");
+        foreach ($status['users'] as $key => $user) {
+          $server["p"][$key]["name"]  = $user['name'];
+          $server["p"][$key]["ping"]  = isset($user['ping']) ? $user['ping'] : 0;
+          $server["p"][$key]["score"] = isset($status_labels[$user['status']]) ? $status_labels[$user['status']] : "Unknown";
+        }
+      }
+
+      if (!empty($status['games'])) {
+        foreach ($status['games'] as $gi => $game) {
+          $server["e"]["game_{$gi}"] = $game['name'] . " (" . $game['owner'] . ", " . $game['players'] . ")";
+        }
+      }
+
+      $lgsl_need["s"] = FALSE;
+      $lgsl_need["e"] = FALSE;
+      $lgsl_need["p"] = FALSE;
+
+      return TRUE;
+    }
+
+    // Phase 4: Fallback to master server (kaillera.com) — no player names
     $players     = 0;
     $playersmax  = 100;
     $server_name = "Kaillera / EmuLinker";
     $game_count  = 0;
 
-    // Query Kaillera master server for player count
     $cache_file = dirname(__FILE__) . '/lgsl_kaillera_master.cache';
     $master_data = lgsl_query_49_master_fetch($cache_file, 10);
 
